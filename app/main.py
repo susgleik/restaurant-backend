@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from app.database import init_db
 from app.core.exceptions import CustomHTTPException
-#from app.routers import auth, users, categories, menu_items, orders, cart
+from app.routers import auth
 from app.config import settings
 
 
@@ -92,3 +92,6 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+    
+    
+app.include_router(auth.router, prefix="/api/v1")
