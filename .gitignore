@@ -273,12 +273,6 @@ alembic/versions/*.py
 # Profiling
 *.prof
 
-# AI/ML models (if any)
-*.pkl
-*.joblib
-*.model
-models/
-
 # Data files
 *.csv
 *.json
