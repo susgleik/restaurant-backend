@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from app.database import init_db
 from app.core.exceptions import CustomHTTPException
-from app.routers import auth, categories, menu_items 
+from app.routers import auth, categories, menu_items, orders
 from app.config import settings
 
 
@@ -97,3 +97,4 @@ if __name__ == "__main__":
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(categories.router, prefix="/api/v1")
 app.include_router(menu_items.router, prefix="/api/v1")
+app.include_router(orders.router, prefix="/api/v1")
