@@ -1,0 +1,81 @@
+services:
+  - type: web
+    name: restaurant-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: |
+      pip install --upgrade pip
+      pip install wheel
+      pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PIP_NO_CACHE_DIR
+        value: 1
+      - key: PIP_DISABLE_PIP_VERSION_CHECK
+        value: 1
+      - key: PYTHONUNBUFFERED
+        value: 1
+      - key: PYTHONDONTWRITEBYTECODE
+        value: 1
+# Variables de entorno específicas (configura los valores en Render Dashboard)
+# Base de datos
+    - key: MONGODB_URL
+      fromDatabase:
+        name: restaurant-mongodb
+        property: connectionString
+    
+    # Seguridad
+    - key: SECRET_KEY
+      generateValue: true
+    - key: ALGORITHM
+      value: HS256
+    - key: ACCESS_TOKEN_EXPIRE_MINUTES
+      value: 30
+    
+    # Configuración de la aplicación
+    - key: APP_NAME
+      value: Restaurant API
+    - key: APP_VERSION
+      value: 1.0.0
+    - key: DEBUG
+      value: False  # Siempre False en producción
+    
+    # Configuración de archivos
+    - key: UPLOAD_FOLDER
+      value: uploads
+    - key: MAX_FILE_SIZE
+      value: 10485760
+    - key: ALLOWED_FILE_EXTENSIONS
+      value: jpg,jpeg,png,gif,webp
+    
+    # Configuración de email
+    - key: SMTP_SERVER
+      value: smtp.gmail.com
+    - key: SMTP_PORT
+      value: 587
+    # - key: SMTP_USERNAME
+    #   value: # Configurar en Dashboard
+    # - key: SMTP_PASSWORD
+    #   value: # Configurar en Dashboard (secreto)
+    
+    # Configuración de CORS para Android
+    - key: ALLOWED_ORIGINS
+      value: "*"
+    - key: ALLOWED_METHODS
+      value: GET,POST,PUT,DELETE,OPTIONS
+    - key: ALLOWED_HEADERS
+      value: "*"
+    
+    # Configuración específica para Android
+    - key: ANDROID_API_VERSION
+      value: v1
+    - key: ENABLE_FILE_UPLOAD
+      value: true
+    - key: COMPRESS_IMAGES
+      value: true
+    - key: IMAGE_QUALITY
+      value: 85
