@@ -3,6 +3,7 @@ from pydantic import Field, validator
 from typing import Optional
 from datetime import datetime
 from decimal import Decimal
+from bson import Decimal128
 
 class CartItem(Document):
     user_id: PydanticObjectId = Field(...)
@@ -14,15 +15,33 @@ class CartItem(Document):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     @validator('menu_item_price', pre=True)
+    @classmethod
     def validate_price(cls, v):
-        if isinstance(v, (int, float)):
+        """Convertir Decimal128 de MongoDB a Decimal de Python"""
+        if isinstance(v, Decimal128):
+            # Convertir Decimal128 a Decimal
+            return Decimal(str(v.to_decimal()))
+        elif isinstance(v, (int, float)):
             return Decimal(str(v))
-        return v
+        elif isinstance(v, str):
+            return Decimal(v)
+        elif isinstance(v, Decimal):
+            return v
+        else:
+            raise ValueError(f"Tipo de precio no soportado: {type(v)}")
     
     @property
     def subtotal(self) -> Decimal:
         """Calcula el subtotal del item del carrito"""
         return self.menu_item_price * self.quantity
+    
+    def dict(self, **kwargs):
+        """Override dict method para asegurar conversión correcta"""
+        data = super().dict(**kwargs)
+        # Asegurar que price sea Decimal
+        if 'menu_item_price' in data and isinstance(data['menu_item_price'], Decimal128):
+            data['menu_item_price'] = Decimal(str(data['menu_item_price'].to_decimal()))
+        return data
     
     class Settings:
         name = "cart_items"

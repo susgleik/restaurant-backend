@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import status  # Import específico y correcto
 from typing import Optional, List
 from beanie import PydanticObjectId
 from datetime import datetime, timedelta
 from decimal import Decimal
+from bson import Decimal128
 
 from app.schemas.order import (
     OrderCreate,
@@ -16,6 +18,7 @@ from app.schemas.order import (
 )
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.menu_item import MenuItem
+from app.models.cart_item import CartItem
 from app.models.user import User
 from app.core.deps import get_current_admin_user
 from app.core.security import get_current_active_user
@@ -29,7 +32,7 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
     description="Obtener lista de pedidos con filtros opcionales"
 )
 async def get_orders(
-    status: Optional[OrderStatus] = Query(None, description="Filtrar por estado"),
+    order_status: Optional[OrderStatus] = Query(None, alias="status", description="Filtrar por estado"),
     user_id: Optional[str] = Query(None, description="Filtrar por usuario (solo ADMIN_STAFF)"),
     date_from: Optional[datetime] = Query(None, description="Fecha desde"),
     date_to: Optional[datetime] = Query(None, description="Fecha hasta"),
@@ -40,18 +43,8 @@ async def get_orders(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Obtener lista de pedidos:
-    
-    - **status**: Filtrar por estado del pedido
-    - **user_id**: Filtrar por usuario (solo ADMIN_STAFF puede ver todos los pedidos)
-    - **date_from**: Fecha desde (formato ISO)
-    - **date_to**: Fecha hasta (formato ISO)
-    - **min_total**: Total mínimo del pedido
-    - **max_total**: Total máximo del pedido
-    - **skip**: Número de pedidos a saltar (paginación)
-    - **limit**: Número máximo de pedidos a retornar
-    
-    Los clientes solo pueden ver sus propios pedidos.
+    Obtener lista de pedidos con filtros opcionales.
+    Los clientes solo ven sus propios pedidos.
     Los ADMIN_STAFF pueden ver todos los pedidos.
     """
     try:
@@ -70,8 +63,8 @@ async def get_orders(
                 )
             filters["user_id"] = PydanticObjectId(user_id)
         
-        if status:
-            filters["status"] = status
+        if order_status:
+            filters["status"] = order_status
         
         if date_from or date_to:
             date_filter = {}
@@ -96,29 +89,7 @@ async def get_orders(
         total = await Order.find(filters).count()
         
         # Convertir a respuesta
-        order_responses = []
-        for order in orders:
-            items_response = [
-                OrderItemResponse(
-                    menu_item_id=str(item.menu_item_id),
-                    menu_item_name=item.menu_item_name,
-                    quantity=item.quantity,
-                    unit_price=item.unit_price,
-                    subtotal=item.subtotal,
-                    special_instructions=item.special_instructions
-                ) for item in order.items
-            ]
-            
-            order_responses.append(OrderResponse(
-                id=str(order.id),
-                user_id=str(order.user_id),
-                items=items_response,
-                total=order.total,
-                status=order.status,
-                notes=order.notes,
-                created_at=order.created_at,
-                updated_at=order.updated_at
-            ))
+        order_responses = await _convert_orders_to_response(orders)
         
         return OrderList(
             orders=order_responses,
@@ -143,12 +114,7 @@ async def get_order(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Obtener pedido por ID:
-    
-    - **order_id**: ID único del pedido
-    
-    Los clientes solo pueden ver sus propios pedidos.
-    Los ADMIN_STAFF pueden ver cualquier pedido.
+    Obtener pedido por ID con información del usuario si es admin.
     """
     try:
         # Validar ObjectId
@@ -184,22 +150,18 @@ async def get_order(
                 }
         
         # Convertir items
-        items_response = [
-            OrderItemResponse(
-                menu_item_id=str(item.menu_item_id),
-                menu_item_name=item.menu_item_name,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                subtotal=item.subtotal,
-                special_instructions=item.special_instructions
-            ) for item in order.items
-        ]
+        items_response = await _convert_order_items_to_response(order.items)
+        
+        # Manejar total
+        total = order.total
+        if isinstance(total, Decimal128):
+            total = Decimal(str(total.to_decimal()))
         
         return OrderWithUserInfo(
             id=str(order.id),
             user_id=str(order.user_id),
             items=items_response,
-            total=order.total,
+            total=total,
             status=order.status,
             notes=order.notes,
             created_at=order.created_at,
@@ -219,22 +181,24 @@ async def get_order(
     response_model=OrderResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Crear nuevo pedido",
-    description="Crear un nuevo pedido desde los items del carrito o especificados"
+    description="Crear un nuevo pedido especificando items manualmente"
 )
 async def create_order(
     order_data: OrderCreate,
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Crear nuevo pedido:
-    
-    - **items**: Lista de items con cantidades e instrucciones especiales
-    - **notes**: Notas adicionales del pedido (opcional)
-    
-    El pedido se crea con los precios actuales de los items del menú.
-    Solo se pueden agregar items disponibles.
+    Crear nuevo pedido especificando items manualmente.
+    Usa los precios actuales de los items del menú.
     """
     try:
+        # Validar que hay items
+        if not order_data.items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El pedido debe tener al menos un item"
+            )
+        
         # Validar y obtener información de los items
         order_items = []
         total = Decimal('0.00')
@@ -262,7 +226,7 @@ async def create_order(
                     detail=f"El item '{menu_item.name}' no está disponible"
                 )
             
-            # Calcular subtotal
+            # Calcular subtotal con precio actual
             subtotal = menu_item.price * item_data.quantity
             total += subtotal
             
@@ -288,21 +252,8 @@ async def create_order(
         # Guardar en la base de datos
         await order.save()
         
-        # Limpiar carrito del usuario después de crear el pedido
-        from app.models.cart_item import CartItem
-        await CartItem.find({"user_id": current_user.id}).delete()
-        
         # Convertir respuesta
-        items_response = [
-            OrderItemResponse(
-                menu_item_id=str(item.menu_item_id),
-                menu_item_name=item.menu_item_name,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                subtotal=item.subtotal,
-                special_instructions=item.special_instructions
-            ) for item in order.items
-        ]
+        items_response = await _convert_order_items_to_response(order.items)
         
         return OrderResponse(
             id=str(order.id),
@@ -322,6 +273,124 @@ async def create_order(
             detail=f"Error al crear pedido: {str(e)}"
         )
 
+@router.post(
+    "/from-cart",
+    response_model=OrderResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear pedido desde el carrito",
+    description="Crear un nuevo pedido con todos los items del carrito del usuario"
+)
+async def create_order_from_cart(
+    notes: Optional[str] = Query(None, max_length=500, description="Notas adicionales del pedido"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Crear pedido desde el carrito del usuario.
+    
+    - Valida que el carrito no esté vacío
+    - Verifica disponibilidad de todos los items
+    - Usa precios actuales (no los guardados en el carrito)
+    - Limpia el carrito después de crear el pedido exitosamente
+    """
+    try:
+        # Obtener items del carrito
+        cart_items = await CartItem.find({"user_id": current_user.id}).to_list()
+        
+        if not cart_items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El carrito está vacío. Agrega items antes de hacer el pedido."
+            )
+        
+        # Validar y convertir items del carrito a items del pedido
+        order_items = []
+        total = Decimal('0.00')
+        unavailable_items = []
+        
+        for cart_item in cart_items:
+            # Obtener item del menú para verificar disponibilidad y precio actual
+            menu_item = await MenuItem.get(cart_item.menu_item_id)
+            
+            if not menu_item:
+                # Item del menú ya no existe, eliminar del carrito
+                await cart_item.delete()
+                unavailable_items.append(f"{cart_item.menu_item_name} (eliminado del menú)")
+                continue
+            
+            # Verificar disponibilidad
+            if not menu_item.available:
+                unavailable_items.append(f"{menu_item.name} (no disponible)")
+                continue
+            
+            # Usar precio ACTUAL del menú, no el guardado en el carrito
+            current_price = menu_item.price
+            subtotal = current_price * cart_item.quantity
+            total += subtotal
+            
+            # Crear OrderItem con precio actual
+            order_item = OrderItem(
+                menu_item_id=menu_item.id,
+                menu_item_name=menu_item.name,
+                quantity=cart_item.quantity,
+                unit_price=current_price,
+                subtotal=subtotal,
+                special_instructions=None  # Los cart_items no tienen instrucciones especiales por ahora
+            )
+            order_items.append(order_item)
+        
+        # Si hay items no disponibles, informar al usuario
+        if unavailable_items:
+            if not order_items:  # Si TODOS los items no están disponibles
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Ningún item del carrito está disponible: {', '.join(unavailable_items)}"
+                )
+            else:  # Si ALGUNOS items no están disponibles, continuar pero informar
+                # Aquí podrías log o notificar, pero continúas con los items disponibles
+                pass
+        
+        # Validar que queden items para el pedido
+        if not order_items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No hay items disponibles para crear el pedido"
+            )
+        
+        # Crear pedido
+        order = Order(
+            user_id=current_user.id,
+            items=order_items,
+            total=total,
+            notes=notes
+        )
+        
+        # Guardar en la base de datos
+        await order.save()
+        
+        # Limpiar carrito SOLO después de crear el pedido exitosamente
+        await CartItem.find({"user_id": current_user.id}).delete()
+        
+        # Convertir respuesta
+        items_response = await _convert_order_items_to_response(order.items)
+        
+        return OrderResponse(
+            id=str(order.id),
+            user_id=str(order.user_id),
+            items=items_response,
+            total=order.total,
+            status=order.status,
+            notes=order.notes,
+            created_at=order.created_at,
+            updated_at=order.updated_at
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al crear pedido desde carrito: {str(e)}"
+        )
+
 @router.patch(
     "/{order_id}/status",
     response_model=OrderResponse,
@@ -334,19 +403,8 @@ async def update_order_status(
     current_user: User = Depends(get_current_admin_user)
 ):
     """
-    Actualizar estado del pedido:
-    
-    - **order_id**: ID único del pedido
-    - **status**: Nuevo estado del pedido
-    
+    Actualizar estado del pedido con validación de transiciones válidas.
     Solo ADMIN_STAFF puede cambiar el estado de los pedidos.
-    
-    Estados válidos:
-    - PENDING: Pedido pendiente
-    - IN_PREPARATION: En preparación
-    - READY: Listo para entregar
-    - DELIVERED: Entregado
-    - CANCELLED: Cancelado
     """
     try:
         # Validar ObjectId
@@ -367,6 +425,13 @@ async def update_order_status(
         # Validar transición de estado
         current_status = order.status
         new_status = status_data.status
+        
+        # Evitar cambios innecesarios
+        if current_status == new_status:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El pedido ya está en estado {new_status}"
+            )
         
         # Lógica de transiciones válidas
         valid_transitions = {
@@ -389,22 +454,18 @@ async def update_order_status(
         await order.save()
         
         # Convertir respuesta
-        items_response = [
-            OrderItemResponse(
-                menu_item_id=str(item.menu_item_id),
-                menu_item_name=item.menu_item_name,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                subtotal=item.subtotal,
-                special_instructions=item.special_instructions
-            ) for item in order.items
-        ]
+        items_response = await _convert_order_items_to_response(order.items)
+        
+        # Manejar total
+        total = order.total
+        if isinstance(total, Decimal128):
+            total = Decimal(str(total.to_decimal()))
         
         return OrderResponse(
             id=str(order.id),
             user_id=str(order.user_id),
             items=items_response,
-            total=order.total,
+            total=total,
             status=order.status,
             notes=order.notes,
             created_at=order.created_at,
@@ -418,107 +479,54 @@ async def update_order_status(
             detail=f"Error al actualizar estado del pedido: {str(e)}"
         )
 
-@router.put(
-    "/{order_id}",
-    response_model=OrderResponse,
-    summary="Actualizar pedido",
-    description="Actualizar notas y estado de un pedido"
-)
-async def update_order(
-    order_id: str,
-    order_data: OrderUpdate,
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Actualizar pedido:
-    
-    - **order_id**: ID único del pedido
-    - **status**: Nuevo estado (opcional, solo ADMIN_STAFF)
-    - **notes**: Nuevas notas (opcional)
-    
-    Los clientes solo pueden actualizar las notas de sus pedidos en estado PENDING.
-    Los ADMIN_STAFF pueden actualizar cualquier campo de cualquier pedido.
-    """
-    try:
-        # Validar ObjectId
-        if not PydanticObjectId.is_valid(order_id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="ID de pedido inválido"
-            )
+# ===== FUNCIONES AUXILIARES =====
+
+async def _convert_order_items_to_response(order_items: List[OrderItem]) -> List[OrderItemResponse]:
+    """Convierte lista de OrderItem a OrderItemResponse manejando Decimal128"""
+    items_response = []
+    for item in order_items:
+        # Manejar conversión de Decimal128 si es necesario
+        unit_price = item.unit_price
+        subtotal = item.subtotal
         
-        # Buscar pedido
-        order = await Order.get(PydanticObjectId(order_id))
-        if not order:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Pedido no encontrado"
-            )
+        if isinstance(unit_price, Decimal128):
+            unit_price = Decimal(str(unit_price.to_decimal()))
+        if isinstance(subtotal, Decimal128):
+            subtotal = Decimal(str(subtotal.to_decimal()))
         
-        # Verificar permisos
-        if current_user.role == "CLIENT":
-            # Los clientes solo pueden editar sus propios pedidos
-            if order.user_id != current_user.id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="No tienes permisos para editar este pedido"
-                )
-            
-            # Los clientes solo pueden editar pedidos en estado PENDING
-            if order.status != OrderStatus.PENDING:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Solo se pueden editar pedidos en estado PENDING"
-                )
-            
-            # Los clientes no pueden cambiar el estado
-            if order_data.status is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Los clientes no pueden cambiar el estado del pedido"
-                )
+        items_response.append(OrderItemResponse(
+            menu_item_id=str(item.menu_item_id),
+            menu_item_name=item.menu_item_name,
+            quantity=item.quantity,
+            unit_price=unit_price,
+            subtotal=subtotal,
+            special_instructions=item.special_instructions
+        ))
+    return items_response
+
+async def _convert_orders_to_response(orders: List[Order]) -> List[OrderResponse]:
+    """Convierte lista de Order a OrderResponse"""
+    order_responses = []
+    for order in orders:
+        items_response = await _convert_order_items_to_response(order.items)
         
-        # Actualizar campos
-        update_data = order_data.dict(exclude_unset=True)
-        if update_data:
-            for field, value in update_data.items():
-                setattr(order, field, value)
-            
-            # Actualizar timestamp
-            order.updated_at = datetime.utcnow()
-            
-            # Guardar cambios
-            await order.save()
+        # Manejar conversión de total si es necesario
+        total = order.total
+        if isinstance(total, Decimal128):
+            total = Decimal(str(total.to_decimal()))
         
-        # Convertir respuesta
-        items_response = [
-            OrderItemResponse(
-                menu_item_id=str(item.menu_item_id),
-                menu_item_name=item.menu_item_name,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                subtotal=item.subtotal,
-                special_instructions=item.special_instructions
-            ) for item in order.items
-        ]
-        
-        return OrderResponse(
+        order_responses.append(OrderResponse(
             id=str(order.id),
             user_id=str(order.user_id),
             items=items_response,
-            total=order.total,
+            total=total,
             status=order.status,
             notes=order.notes,
             created_at=order.created_at,
             updated_at=order.updated_at
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al actualizar pedido: {str(e)}"
-        )
+        ))
+    return order_responses  
+
 
 @router.delete(
     "/{order_id}",
@@ -531,12 +539,7 @@ async def cancel_order(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Cancelar pedido:
-    
-    - **order_id**: ID único del pedido
-    
-    Los clientes pueden cancelar sus propios pedidos si están en estado PENDING.
-    Los ADMIN_STAFF pueden cancelar cualquier pedido que no esté DELIVERED.
+    Cancelar pedido con validaciones de estado y permisos.
     """
     try:
         # Validar ObjectId
@@ -596,94 +599,7 @@ async def cancel_order(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al cancelar pedido: {str(e)}"
         )
-
-@router.get(
-    "/user/{user_id}",
-    response_model=OrderList,
-    summary="Obtener pedidos de un usuario",
-    description="Obtener todos los pedidos de un usuario específico (solo ADMIN_STAFF)"
-)
-async def get_user_orders(
-    user_id: str,
-    status: Optional[OrderStatus] = Query(None, description="Filtrar por estado"),
-    skip: int = Query(0, ge=0, description="Número de pedidos a saltar"),
-    limit: int = Query(50, ge=1, le=100, description="Número máximo de pedidos a retornar"),
-    current_user: User = Depends(get_current_admin_user)
-):
-    """
-    Obtener pedidos de un usuario:
-    
-    - **user_id**: ID del usuario
-    - **status**: Filtrar por estado (opcional)
-    - **skip**: Número de pedidos a saltar (paginación)
-    - **limit**: Número máximo de pedidos a retornar
-    
-    Solo ADMIN_STAFF puede acceder a esta función.
-    """
-    try:
-        # Validar ObjectId
-        if not PydanticObjectId.is_valid(user_id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="ID de usuario inválido"
-            )
         
-        # Verificar que el usuario existe
-        user = await User.get(PydanticObjectId(user_id))
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Usuario no encontrado"
-            )
-        
-        # Construir filtros
-        filters = {"user_id": PydanticObjectId(user_id)}
-        if status:
-            filters["status"] = status
-        
-        # Obtener pedidos
-        orders = await Order.find(filters).skip(skip).limit(limit).sort(-Order.created_at).to_list()
-        
-        # Contar total
-        total = await Order.find(filters).count()
-        
-        # Convertir a respuesta
-        order_responses = []
-        for order in orders:
-            items_response = [
-                OrderItemResponse(
-                    menu_item_id=str(item.menu_item_id),
-                    menu_item_name=item.menu_item_name,
-                    quantity=item.quantity,
-                    unit_price=item.unit_price,
-                    subtotal=item.subtotal,
-                    special_instructions=item.special_instructions
-                ) for item in order.items
-            ]
-            
-            order_responses.append(OrderResponse(
-                id=str(order.id),
-                user_id=str(order.user_id),
-                items=items_response,
-                total=order.total,
-                status=order.status,
-                notes=order.notes,
-                created_at=order.created_at,
-                updated_at=order.updated_at
-            ))
-        
-        return OrderList(
-            orders=order_responses,
-            total=total
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al obtener pedidos del usuario: {str(e)}"
-        )
-
 @router.get(
     "/stats/dashboard",
     response_model=OrderStats,
@@ -696,12 +612,7 @@ async def get_order_stats(
     current_user: User = Depends(get_current_admin_user)
 ):
     """
-    Obtener estadísticas de pedidos:
-    
-    - **date_from**: Fecha desde (opcional, por defecto últimos 30 días)
-    - **date_to**: Fecha hasta (opcional, por defecto hoy)
-    
-    Solo ADMIN_STAFF puede acceder a estas estadísticas.
+    Obtener estadísticas de pedidos para dashboard administrativo.
     """
     try:
         # Establecer fechas por defecto si no se proporcionan
@@ -750,186 +661,4 @@ async def get_order_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al obtener estadísticas: {str(e)}"
-        )
-
-@router.get(
-    "/status/{status}",
-    response_model=OrderList,
-    summary="Obtener pedidos por estado",
-    description="Obtener todos los pedidos filtrados por estado específico"
-)
-async def get_orders_by_status(
-    status: OrderStatus,
-    skip: int = Query(0, ge=0, description="Número de pedidos a saltar"),
-    limit: int = Query(50, ge=1, le=100, description="Número máximo de pedidos a retornar"),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Obtener pedidos por estado:
-    
-    - **status**: Estado del pedido
-    - **skip**: Número de pedidos a saltar (paginación)
-    - **limit**: Número máximo de pedidos a retornar
-    
-    Los clientes solo ven sus propios pedidos.
-    Los ADMIN_STAFF ven todos los pedidos.
-    """
-    try:
-        # Construir filtros
-        filters = {"status": status}
-        
-        # Los clientes solo pueden ver sus propios pedidos
-        if current_user.role == "CLIENT":
-            filters["user_id"] = current_user.id
-        
-        # Obtener pedidos
-        orders = await Order.find(filters).skip(skip).limit(limit).sort(-Order.created_at).to_list()
-        
-        # Contar total
-        total = await Order.find(filters).count()
-        
-        # Convertir a respuesta
-        order_responses = []
-        for order in orders:
-            items_response = [
-                OrderItemResponse(
-                    menu_item_id=str(item.menu_item_id),
-                    menu_item_name=item.menu_item_name,
-                    quantity=item.quantity,
-                    unit_price=item.unit_price,
-                    subtotal=item.subtotal,
-                    special_instructions=item.special_instructions
-                ) for item in order.items
-            ]
-            
-            order_responses.append(OrderResponse(
-                id=str(order.id),
-                user_id=str(order.user_id),
-                items=items_response,
-                total=order.total,
-                status=order.status,
-                notes=order.notes,
-                created_at=order.created_at,
-                updated_at=order.updated_at
-            ))
-        
-        return OrderList(
-            orders=order_responses,
-            total=total
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al obtener pedidos por estado: {str(e)}"
-        )
-
-@router.post(
-    "/from-cart",
-    response_model=OrderResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Crear pedido desde el carrito",
-    description="Crear un nuevo pedido con todos los items del carrito del usuario"
-)
-async def create_order_from_cart(
-    notes: Optional[str] = Query(None, max_length=500, description="Notas adicionales del pedido"),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Crear pedido desde el carrito:
-    
-    - **notes**: Notas adicionales del pedido (opcional)
-    
-    Convierte todos los items del carrito del usuario en un pedido.
-    El carrito se vacía después de crear el pedido exitosamente.
-    """
-    try:
-        # Obtener items del carrito
-        from app.models.cart_item import CartItem
-        cart_items = await CartItem.find({"user_id": current_user.id}).to_list()
-        
-        if not cart_items:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El carrito está vacío"
-            )
-        
-        # Validar y convertir items del carrito a items del pedido
-        order_items = []
-        total = Decimal('0.00')
-        
-        for cart_item in cart_items:
-            # Obtener item del menú para precio actual
-            menu_item = await MenuItem.get(cart_item.menu_item_id)
-            if not menu_item:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Item del menú no encontrado: {cart_item.menu_item_name}"
-                )
-            
-            # Verificar disponibilidad
-            if not menu_item.available:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"El item '{menu_item.name}' ya no está disponible"
-                )
-            
-            # Calcular subtotal con precio actual
-            subtotal = menu_item.price * cart_item.quantity
-            total += subtotal
-            
-            # Crear OrderItem
-            order_item = OrderItem(
-                menu_item_id=menu_item.id,
-                menu_item_name=menu_item.name,
-                quantity=cart_item.quantity,
-                unit_price=menu_item.price,
-                subtotal=subtotal,
-                special_instructions=None  # Los cart_items no tienen instrucciones especiales
-            )
-            order_items.append(order_item)
-        
-        # Crear pedido
-        order = Order(
-            user_id=current_user.id,
-            items=order_items,
-            total=total,
-            notes=notes
-        )
-        
-        # Guardar en la base de datos
-        await order.save()
-        
-        # Limpiar carrito
-        await CartItem.find({"user_id": current_user.id}).delete()
-        
-        # Convertir respuesta
-        items_response = [
-            OrderItemResponse(
-                menu_item_id=str(item.menu_item_id),
-                menu_item_name=item.menu_item_name,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                subtotal=item.subtotal,
-                special_instructions=item.special_instructions
-            ) for item in order.items
-        ]
-        
-        return OrderResponse(
-            id=str(order.id),
-            user_id=str(order.user_id),
-            items=items_response,
-            total=order.total,
-            status=order.status,
-            notes=order.notes,
-            created_at=order.created_at,
-            updated_at=order.updated_at
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al crear pedido desde carrito: {str(e)}"
         )
