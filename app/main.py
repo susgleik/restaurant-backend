@@ -17,10 +17,10 @@ from app.config import settings
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
-    print("🚀 Database initialized")
+    print("Database initialized")
     yield
     # Shutdown
-    print("👋 Shutting down...")
+    print("Shutting down...")
 
 
 # Create FastAPI app
@@ -44,12 +44,12 @@ app.add_middleware(
 )
 
 
-# Static files for uploaded images
-if not os.path.exists("uploads"):
-    os.makedirs("uploads")
+# Static files for uploaded images if we use filesystem
+if not settings.use_azure_storage:
+    if not os.path.exists("uploads"):
+        os.makedirs("uploads")
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
     
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
 # Custom exception handler
 @app.exception_handler(CustomHTTPException)
 async def custom_exception_handler(request: Request, exc: CustomHTTPException):
@@ -66,10 +66,20 @@ async def custom_exception_handler(request: Request, exc: CustomHTTPException):
 # Health check endpoint
 @app.get("/health")
 async def health_check():
+    storage_info = {
+        "storage_mode": settings.storage_mode,
+        "use_azure_storage": settings.use_azure_storage,
+    }
+    
+    if settings.use_azure_storage:
+        storage_info["azure_account"] = settings.azure_storage_account_name
+        storage_info["azure_container"] = settings.azure_container_name
+        
     return {
         "status": "healthy",
         "service": "Restaurant API",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "storage": storage_info
     }
     
     
@@ -99,3 +109,4 @@ app.include_router(categories.router, prefix="/api/v1")
 app.include_router(menu_items.router, prefix="/api/v1")
 app.include_router(cart.router, prefix="/api/v1")
 app.include_router(orders.router, prefix="/api/v1")
+#app.include_router(azure_images_router, prefix="/api/v1")

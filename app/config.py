@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 import os
 
 class Settings(BaseSettings):
@@ -39,21 +39,59 @@ class Settings(BaseSettings):
     compress_images: bool = True
     image_quality: int = 85
     
+    # Azure Blob Storage (nuevos campos)
+    azure_storage_account_name: str = ""
+    azure_storage_account_key: str = ""
+    azure_storage_connection_string: str = ""
+    azure_container_name: str = "restaurant-images"
+    azure_cdn_url: Optional[str] = None
+    
+    # Storage mode: "filesystem" o "azure"
+    storage_mode: str = "azure"  # Por defecto filesystem para compatibilidad
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore" 
         # Permite que las variables del .env sobrescriban los valores por defecto
+    
+    @property
+    def use_azure_storage(self) -> bool:
+        """Determina si se está usando Azure Storage"""
+        return (
+            self.storage_mode.lower() == "azure" and
+            self.azure_storage_account_name and 
+            (self.azure_storage_account_key or self.azure_storage_connection_string)
+        )
+    
+    def get_azure_blob_url(self, blob_name: str) -> str:
+        """Generar URL completa para un blob de Azure"""
+        if self.azure_cdn_url:
+            return f"{self.azure_cdn_url}/{self.azure_container_name}/{blob_name}"
+        else:
+            return f"https://{self.azure_storage_account_name}.blob.core.windows.net/{self.azure_container_name}/{blob_name}"
 
 # Create settings instance
 settings = Settings()
 
-# Create upload directories
-upload_dirs = [
-    settings.upload_folder,
-    f"{settings.upload_folder}/images",
-    f"{settings.upload_folder}/temp"
-]
+# Create upload directories solo si usamos filesystem
+if not settings.use_azure_storage:
+    upload_dirs = [
+        settings.upload_folder,
+        f"{settings.upload_folder}/images",
+        f"{settings.upload_folder}/temp"
+    ]
 
-for directory in upload_dirs:
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+    for directory in upload_dirs:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            
+# Imprimir modo de almacenamiento para debug
+if settings.debug:
+    storage_type = "Azure Blob Storage" if settings.use_azure_storage else "Filesystem"
+    print(f"🗂️  Modo de almacenamiento: {storage_type}")
+    if settings.use_azure_storage:
+        print(f"📦 Container Azure: {settings.azure_container_name}")
+        print(f"🌐 Account: {settings.azure_storage_account_name}")
+    else:
+        print(f"📁 Directorio local: {settings.upload_folder}")

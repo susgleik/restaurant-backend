@@ -71,3 +71,7 @@ python-dateutil==2.8.2
 # Herramientas de desarrollo
 black==23.11.0
 isort==5.12.0
+
+# Azure Storage para manejo de archivos
+azure-storage-blob==12.19.0
+azure-identity==1.15.0
