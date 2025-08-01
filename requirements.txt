@@ -75,3 +75,5 @@ isort==5.12.0
 # Azure Storage para manejo de archivos
 azure-storage-blob==12.19.0
 azure-identity==1.15.0
+aiohttp==3.9.1
+azure-core==1.29.5

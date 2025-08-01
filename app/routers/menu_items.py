@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, File, UploadFile
 from typing import Optional
 from beanie import PydanticObjectId
 from datetime import datetime
@@ -17,8 +17,110 @@ from app.models.category import Category
 from app.models.user import User
 from app.core.deps import get_current_admin_user
 from app.core.security import get_current_active_user
+from app.config import settings
+
+# import azure dependencies if using Azure
+if settings.use_azure_storage:
+    from app.utils.azure_image_utils import AzureImageProcessor
 
 router = APIRouter(prefix="/menu-items", tags=["Menu Items"])
+
+# endpoints for uploading images
+@router.post(
+    "/upload-image",
+    summary="upload image for menu item",
+    description="Upload an image for a menu item. Requires authentication (only admin/staff).",
+)
+async def upload_menu_item_image(
+    file: UploadFile = File(..., description="Image file to upload"),
+    current_user: User = Depends(get_current_admin_user)  
+):
+    """ 
+    Upload an image for a menu item.
+    
+    - file: Image file to upload (JPG, PNG, WEBP, GIF)
+    - max file size configured in settings 
+    
+    ADMIN_STAFF authentication required.
+    
+    Returns the URL of the uploaded image.
+    """
+    
+    try:
+        if not settings.use_azure_storage:
+            raise HTTPException(
+                status_code=501,
+                detail="File upload is not supported in this configuration. Please use Azure Storage."
+            )
+        
+        processor = AzureImageProcessor()
+        
+        try: 
+            image_url = await processor.upload_image(file, folder="menu-items")
+            
+            return {
+                "success": True,
+                "message": "Image uploaded successfully",
+                "image_url": image_url,
+                "filename": image_url.split("/")[-1]
+            }
+        finally:
+            await processor.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading image: {str(e)}"
+        )
+        
+@router.delete(
+    "delete-image/",
+    summary="Delete image for menu item",
+    description="Delete an image for a menu item by its filename. Requires authentication (only admin/staff).",
+)
+async def delete_menu_item_image(
+    image_url: str = Query(..., description="URL of the image to delete"),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """ 
+    delete an image by its URL.
+    - image_url: use the full URL of the image to delete. 
+    
+    ADMIN_STAFF authentication required.
+    """
+    try: 
+        if not settings.use_azure_storage:
+            raise HTTPException(
+                status_code=501,
+                detail="File deletion is not supported in this configuration. Please use Azure Storage."
+            )
+            
+            processor = AzureImageProcessor()
+            
+        try:
+            success = await processor.delete_image(image_url)
+            if success:
+                return {
+                    "success": True,
+                    "message": "Image deleted successfully"
+                }
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Image not found"
+                )
+        finally:
+            await processor.close()
+            
+    except HTTPException:
+        raise   
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting image: {str(e)}"
+        )
+
 
 @router.get(
     "/",
@@ -27,6 +129,7 @@ router = APIRouter(prefix="/menu-items", tags=["Menu Items"])
     description="Obtener lista de todos los items del menú con filtros opcionales",
 )
 async def get_menu_items(
+    
     category_id: Optional[str] = Query(None, description="Filtrar por categoría"),
     available: Optional[bool] = Query(None, description="Filtrar por disponibilidad"),
     min_price: Optional[Decimal] = Query(None, ge=0, description="Precio mínimo"),
