@@ -8,8 +8,10 @@ from contextlib import asynccontextmanager
 
 from app.database import init_db
 from app.core.exceptions import CustomHTTPException
-from app.routers import auth, categories, menu_items, orders, cart
+from app.routers import auth, categories, orders, cart
 from app.config import settings
+
+from app.routers import main_router
 
 
 # Lifecycle events
@@ -106,7 +108,8 @@ if __name__ == "__main__":
     
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(categories.router, prefix="/api/v1")
-app.include_router(menu_items.router, prefix="/api/v1")
+#app.include_router(menu_items.router, prefix="/api/v1")
 app.include_router(cart.router, prefix="/api/v1")
 app.include_router(orders.router, prefix="/api/v1")
 #app.include_router(azure_images_router, prefix="/api/v1")
+app.include_router(main_router)
