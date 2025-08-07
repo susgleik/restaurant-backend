@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, status, Query, File, UploadFile, Form
 from typing import Optional
 from beanie import PydanticObjectId
 from datetime import datetime
@@ -133,3 +133,167 @@ async def update_menu_item(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al actualizar item del menú: {str(e)}"
         )
+        
+@router.put(
+    "/{item_id}/update-with-image",
+    response_model=MenuItemResponse,
+    
+)
+async def update_menu_item_with_image(
+    item_id: str,
+    category_id: Optional[str] = Form(None, description="Nuevo ID de la categoría"),
+    name: Optional[str] = Form(None, min_length=2, max_length=100, description="Nuevo nombre del item"),
+    description: Optional[str] = Form(None, max_length=500, description="Nueva descripción del item"),
+    price: Optional[Decimal] = Form(None, gt=0, description="Nuevo precio del item"),
+    available: Optional[bool] = Form(None, description="Nueva disponibilidad del item"),
+    image: UploadFile = File(None, description="Nueva imagen del item (opcional)"),
+    
+    # Flag para eliminar imagen actual
+    remove_image: bool = Form(False, description="Eliminar imagen actual del item"),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """
+    Actualizar item del menú con imagen:
+    
+    - item_id: ID único del item
+    - category_id: Nuevo ID de categoría (opcional)
+    - name: Nuevo nombre (opcional)
+    - description: Nueva descripción (opcional)  
+    - price: Nuevo precio (opcional)
+    - available: Nueva disponibilidad (opcional)
+    - image: Nueva imagen (opcional)
+    - remove_image**: Eliminar imagen actual (opcional)
+    
+    Requiere autenticación con rol ADMIN_STAFF.
+    """
+    
+    processor = None
+    image_url = None
+    old_image_url = None
+    
+    try:
+        
+        if not PydanticObjectId.is_valid(item_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ID de item inválido"
+            )
+        # search item
+        item = await MenuItem.get(PydanticObjectId(item_id))
+        if not item:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Item del menú no encontrado"
+            )
+        
+        old_image_url = item.image_url
+        
+        # check if category_id is provided
+        if category_id:
+            if not PydanticObjectId.is_valid(category_id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="ID de categoría inválido"
+                )
+            category = await Category.get(PydanticObjectId(category_id))
+            if not category:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Categoría no encontrada"
+                )
+            if not category.active:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No se puede mover un item a una categoría inactiva"
+                )
+        
+        # check if item with same name exists in category
+        if name and name != item.name:
+            category_id_to_check = PydanticObjectId(category_id) if category_id else item.category_id
+            existing_item = await MenuItem.find_one({
+                "category_id": category_id_to_check,
+                "name": name,
+                "_id": {"$ne": item.id} 
+            })
+            if existing_item:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Ya existe un item con este nombre en esta categoría"
+                )
+        
+        # image processing
+        if image and image.filename:
+            # upload new image 
+            if not settings.use_azure_storage:
+                raise HTTPException(
+                    status_code=501,
+                    detail="File upload is not supported in this configuration. Please use Azure Storage."
+                )    
+            
+            processor = AzureImageProcessor()
+            new_image_url = await processor.upload_image(image, folder="menu-items")
+        elif remove_image:
+                # Eliminar imagen actual
+            new_image_url = None
+        
+        # Actualizar campos
+        if category_id:
+            item.category_id = PydanticObjectId(category_id)
+        if name:
+            item.name = name
+        if description is not None:  # Permitir string vacío
+            item.description = description
+        if price:
+            item.price = price
+        if available is not None:
+            item.available = available
+        if new_image_url is not None or remove_image:
+            item.image_url = new_image_url
+        
+        # Actualizar timestamp
+        item.updated_at = datetime.utcnow()
+        
+        # Guardar cambios
+        await item.save()
+        
+        # Eliminar imagen anterior si se cambió
+        if (new_image_url or remove_image) and old_image_url and processor:
+            try:
+                await processor.delete_image(old_image_url)
+            except:
+                pass  # Si no se puede eliminar la imagen anterior, no fallar
+        
+        return MenuItemResponse(
+            id=str(item.id),
+            category_id=str(item.category_id),
+            name=item.name,
+            description=item.description,
+            price=item.price,
+            image_url=item.image_url,
+            available=item.available,
+            created_at=item.created_at,
+            updated_at=item.updated_at
+        )
+    except HTTPException:
+        # if exists an error, delete the new image if it was uploaded
+        if new_image_url and processor:
+            try:
+                await processor.delete_image(new_image_url)
+            except:
+                pass  # Si no se puede eliminar la nueva imagen, no fallar
+        raise  
+    except Exception as e:
+        # if exists an error, delete the new image if it was uploaded
+        if new_image_url and processor:
+            try:
+                await processor.delete_image(new_image_url)
+            except:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al actualizar item del menú: {str(e)}"
+        )
+    finally:
+        if processor:
+            await processor.close()   
+            

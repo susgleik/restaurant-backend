@@ -230,7 +230,7 @@ async def create_menu_item_with_image(
                     detail="File upload is not supported in this configuration. Please use Azure Storage."
                 )
             processor = AzureImageProcessor()
-            image_url = await processor.upload_image(image, folder="menu_items")
+            image_url = await processor.upload_image(image, folder="menu-items")
         
         # create new item 
         item = MenuItem(
