@@ -19,7 +19,7 @@ from app.core.deps import get_current_admin_user
 from app.core.security import get_current_active_user
 from app.config import settings
 
-router = APIRouter(prefix="/menu-items", tags=["Menu Items"])
+router = APIRouter()
 
 # import azure dependencies if using Azure
 if settings.use_azure_storage:

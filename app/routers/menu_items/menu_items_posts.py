@@ -19,7 +19,7 @@ from app.config import settings
 if settings.use_azure_storage:
     from app.utils.azure_image_utils import AzureImageProcessor
     
-router = APIRouter(prefix="/menu-items", tags=["Menu Items"])
+router = APIRouter()
      
 @router.post(
     "/",
